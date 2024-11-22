@@ -11,7 +11,7 @@ import torch
 import torch.fx
 import torch.nn.functional as F
 import torch.testing._internal.optests as optests
-from common_utils import assert_equal, cpu_and_cuda, cpu_and_cuda_and_mps, needs_cuda, needs_mps
+from common_utils import assert_equal, cpu_and_cuda, cpu_and_cuda_and_mps, needs_cuda, needs_mps, needs_xpu
 from PIL import Image
 from torch import nn, Tensor
 from torch._dynamo.utils import is_compile_supported
@@ -831,6 +831,7 @@ class TestNMS:
         (
             pytest.param("cuda", marks=pytest.mark.needs_cuda),
             pytest.param("mps", marks=pytest.mark.needs_mps),
+            pytest.param("xpu", marks=pytest.mark.needs_xpu),
         ),
     )
     @pytest.mark.parametrize("iou", (0.2, 0.5, 0.8))
