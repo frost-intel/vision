@@ -73,11 +73,11 @@ def smoke_test_torchvision_decode_jpeg(device: str = "cpu"):
         raise RuntimeError(f"Unexpected shape of img_jpg: {img_jpg.shape}")
 
 
-def smoke_test_compile() -> None:
+def smoke_test_compile(device="cuda") -> None:
     try:
-        model = resnet50().cuda()
+        model = resnet50().to(device)
         model = torch.compile(model)
-        x = torch.randn(1, 3, 224, 224, device="cuda")
+        x = torch.randn(1, 3, 224, 224, device=device)
         out = model(x)
         print(f"torch.compile model output: {out.shape}")
     except RuntimeError:
@@ -115,6 +115,7 @@ def smoke_test_torchvision_resnet50_classify(device: str = "cpu") -> None:
 def main() -> None:
     print(f"torchvision: {torchvision.__version__}")
     print(f"torch.cuda.is_available: {torch.cuda.is_available()}")
+    print(f"torch.xpu.is_available: {torch.xpu.is_available()}")
 
     print(f"{torch.ops.image._jpeg_version() = }")
     if not torch.ops.image._is_compiled_against_turbo():
@@ -141,6 +142,12 @@ def main() -> None:
 
     if torch.backends.mps.is_available():
         smoke_test_torchvision_resnet50_classify("mps")
+    
+    if torch.xpu.is_available():
+        smoke_test_torchvision_resnet50_classify("xpu")
+        #  torch.compile is not supported on Python 3.14+ and Python built with GIL disabled
+        if sys.version_info < (3, 14, 0) and not sysconfig.get_config_var("Py_GIL_DISABLED"):
+            smoke_test_compile("xpu")
 
 
 if __name__ == "__main__":

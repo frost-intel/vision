@@ -9,7 +9,7 @@ import pytest
 import torch
 import torchvision.transforms.functional as F
 import torchvision.utils as utils
-from common_utils import assert_equal, cpu_and_cuda
+from common_utils import assert_equal, cpu_and_cuda_and_xpu
 from PIL import __version__ as PILLOW_VERSION, Image, ImageColor
 from torchvision.transforms.v2.functional import to_dtype
 
@@ -233,7 +233,7 @@ def test_draw_no_boxes():
     ],
 )
 @pytest.mark.parametrize("alpha", (0, 0.5, 0.7, 1))
-@pytest.mark.parametrize("device", cpu_and_cuda())
+@pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
 def test_draw_segmentation_masks(colors, alpha, device):
     """This test makes sure that masks draw their corresponding color where they should"""
     num_masks, h, w = 2, 100, 100
@@ -296,7 +296,7 @@ def test_draw_segmentation_masks_dtypes():
     torch.testing.assert_close(out_uint8, to_dtype(out_float, torch.uint8, scale=True), rtol=0, atol=1)
 
 
-@pytest.mark.parametrize("device", cpu_and_cuda())
+@pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
 def test_draw_segmentation_masks_errors(device):
     h, w = 10, 10
 
@@ -333,7 +333,7 @@ def test_draw_segmentation_masks_errors(device):
         utils.draw_segmentation_masks(image=img, masks=masks, colors=bad_colors)
 
 
-@pytest.mark.parametrize("device", cpu_and_cuda())
+@pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
 def test_draw_no_segmention_mask(device):
     img = torch.full((3, 100, 100), 0, dtype=torch.uint8, device=device)
     masks = torch.full((0, 100, 100), 0, dtype=torch.bool, device=device)

@@ -162,7 +162,7 @@ def test_force_subclass_with_metadata(return_type):
     if return_type == "TVTensor":
         assert bbox.format, bbox.canvas_size == (format, canvas_size)
 
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() or torch.xpu.is_available():
         bbox = bbox.pin_memory()
         if return_type == "TVTensor":
             assert bbox.format, bbox.canvas_size == (format, canvas_size)

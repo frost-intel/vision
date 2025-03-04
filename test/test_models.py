@@ -15,7 +15,7 @@ import torch
 import torch.fx
 import torch.nn as nn
 from _utils_internal import get_relative_path
-from common_utils import cpu_and_cuda, freeze_rng_state, map_nested_tensor_object, needs_cuda, set_rng_seed
+from common_utils import cpu_and_cuda_and_xpu, freeze_rng_state, map_nested_tensor_object, cuda_and_xpu, set_rng_seed
 from PIL import Image
 from torchvision import models, transforms
 from torchvision.models import get_model_builder, list_models
@@ -149,7 +149,7 @@ def _assert_expected(output, name, prec=None, atol=None, rtol=None):
         if binary_size > MAX_PICKLE_SIZE:
             raise RuntimeError(f"The output for {filename}, is larger than 50kb - got {binary_size}kb")
     else:
-        expected = torch.load(expected_file, weights_only=True)
+        expected = torch.load(expected_file, map_location=output.device, weights_only=True)
         rtol = rtol or prec  # keeping prec param for legacy reason, but could be removed ideally
         atol = atol or prec
         torch.testing.assert_close(output, expected, rtol=rtol, atol=atol, check_dtype=False, check_device=False)
@@ -400,10 +400,10 @@ for m in slow_models:
 
 # skip big models to reduce memory usage on CI test. We can exclude combinations of (platform-system, device).
 skipped_big_models = {
-    "vit_h_14": {("Windows", "cpu"), ("Windows", "cuda")},
-    "regnet_y_128gf": {("Windows", "cpu"), ("Windows", "cuda")},
-    "mvit_v1_b": {("Windows", "cuda"), ("Linux", "cuda")},
-    "mvit_v2_s": {("Windows", "cuda"), ("Linux", "cuda")},
+    "vit_h_14": {("Windows", "cpu"), ("Windows", "cuda"), ("Windows", "xpu")},
+    "regnet_y_128gf": {("Windows", "cpu"), ("Windows", "cuda"), ("Windows", "xpu")},
+    "mvit_v1_b": {("Windows", "cuda"), ("Linux", "cuda"), ("Windows", "xpu"), ("Linux", "xpu")},
+    "mvit_v2_s": {("Windows", "cuda"), ("Linux", "cuda"), ("Windows", "xpu"), ("Linux", "xpu")},
 }
 
 
@@ -587,8 +587,8 @@ def test_googlenet_eval():
     _check_input_backprop(model, x)
 
 
-@needs_cuda
-def test_fasterrcnn_switch_devices():
+@pytest.mark.parametrize("dev", cuda_and_xpu())
+def test_fasterrcnn_switch_devices(dev):
     def checkOut(out):
         assert len(out) == 1
         assert "boxes" in out[0]
@@ -596,17 +596,17 @@ def test_fasterrcnn_switch_devices():
         assert "labels" in out[0]
 
     model = models.detection.fasterrcnn_resnet50_fpn(num_classes=50, weights=None, weights_backbone=None)
-    model.cuda()
+    model.to(dev)
     model.eval()
     input_shape = (3, 300, 300)
-    x = torch.rand(input_shape, device="cuda")
+    x = torch.rand(input_shape, device=dev)
     model_input = [x]
     out = model(model_input)
     assert model_input[0] is x
 
     checkOut(out)
 
-    with torch.cuda.amp.autocast():
+    with torch.amp.autocast(dev):
         out = model(model_input)
 
     checkOut(out)
@@ -666,14 +666,14 @@ def vitc_b_16(**kwargs: Any):
 
 
 @pytest.mark.parametrize("model_fn", [vitc_b_16])
-@pytest.mark.parametrize("dev", cpu_and_cuda())
+@pytest.mark.parametrize("dev", cpu_and_cuda_and_xpu())
 def test_vitc_models(model_fn, dev):
     test_classification_model(model_fn, dev)
 
 
 @torch.backends.cudnn.flags(allow_tf32=False)  # see: https://github.com/pytorch/vision/issues/7618
 @pytest.mark.parametrize("model_fn", list_model_fns(models))
-@pytest.mark.parametrize("dev", cpu_and_cuda())
+@pytest.mark.parametrize("dev", cpu_and_cuda_and_xpu())
 def test_classification_model(model_fn, dev):
     set_rng_seed(0)
     defaults = {
@@ -704,19 +704,18 @@ def test_classification_model(model_fn, dev):
     _check_jit_scriptable(model, (x,), unwrapper=script_model_unwrapper.get(model_name, None), eager_out=out)
     _check_fx_compatible(model, x, eager_out=out)
 
-    if dev == "cuda":
-        with torch.cuda.amp.autocast():
-            out = model(x)
-            # See autocast_flaky_numerics comment at top of file.
-            if model_name not in autocast_flaky_numerics:
-                _assert_expected(out.cpu(), model_name, prec=0.1)
-            assert out.shape[-1] == 50
+    with torch.amp.autocast(dev):
+        out = model(x)
+        # See autocast_flaky_numerics comment at top of file.
+        if model_name not in autocast_flaky_numerics:
+            _assert_expected(out.cpu(), model_name, prec=0.1)
+        assert out.shape[-1] == 50
 
     _check_input_backprop(model, x)
 
 
 @pytest.mark.parametrize("model_fn", list_model_fns(models.segmentation))
-@pytest.mark.parametrize("dev", cpu_and_cuda())
+@pytest.mark.parametrize("dev", cpu_and_cuda_and_xpu())
 def test_segmentation_model(model_fn, dev):
     set_rng_seed(0)
     defaults = {
@@ -730,7 +729,7 @@ def test_segmentation_model(model_fn, dev):
 
     model = model_fn(**kwargs)
     model.eval().to(device=dev)
-    # RNG always on CPU, to ensure x in cuda tests is bitwise identical to x in cpu tests
+    # RNG always on CPU, to ensure x in GPU tests is bitwise identical to x in cpu tests
     x = torch.rand(input_shape).to(device=dev)
     with torch.no_grad(), freeze_rng_state():
         out = model(x)
@@ -760,12 +759,11 @@ def test_segmentation_model(model_fn, dev):
     _check_jit_scriptable(model, (x,), unwrapper=script_model_unwrapper.get(model_name, None), eager_out=out)
     _check_fx_compatible(model, x, eager_out=out)
 
-    if dev == "cuda":
-        with torch.cuda.amp.autocast(), torch.no_grad(), freeze_rng_state():
-            out = model(x)
-            # See autocast_flaky_numerics comment at top of file.
-            if model_name not in autocast_flaky_numerics:
-                full_validation &= check_out(out["out"])
+    with torch.amp.autocast(dev), torch.no_grad(), freeze_rng_state():
+        out = model(x)
+        # See autocast_flaky_numerics comment at top of file.
+        if model_name not in autocast_flaky_numerics:
+            full_validation &= check_out(out["out"])
 
     if not full_validation:
         msg = (
@@ -781,7 +779,7 @@ def test_segmentation_model(model_fn, dev):
 
 
 @pytest.mark.parametrize("model_fn", list_model_fns(models.detection))
-@pytest.mark.parametrize("dev", cpu_and_cuda())
+@pytest.mark.parametrize("dev", cpu_and_cuda_and_xpu())
 def test_detection_model(model_fn, dev):
     set_rng_seed(0)
     defaults = {
@@ -863,12 +861,11 @@ def test_detection_model(model_fn, dev):
     full_validation = check_out(out)
     _check_jit_scriptable(model, ([x],), unwrapper=script_model_unwrapper.get(model_name, None), eager_out=out)
 
-    if dev == "cuda":
-        with torch.cuda.amp.autocast(), torch.no_grad(), freeze_rng_state():
-            out = model(model_input)
-            # See autocast_flaky_numerics comment at top of file.
-            if model_name not in autocast_flaky_numerics:
-                full_validation &= check_out(out)
+    with torch.amp.autocast(dev), torch.no_grad(), freeze_rng_state():
+        out = model(model_input)
+        # See autocast_flaky_numerics comment at top of file.
+        if model_name not in autocast_flaky_numerics:
+            full_validation &= check_out(out)
 
     if not full_validation:
         msg = (
@@ -913,7 +910,7 @@ def test_detection_model_validation(model_fn):
 
 
 @pytest.mark.parametrize("model_fn", list_model_fns(models.video))
-@pytest.mark.parametrize("dev", cpu_and_cuda())
+@pytest.mark.parametrize("dev", cpu_and_cuda_and_xpu())
 def test_video_model(model_fn, dev):
     set_rng_seed(0)
     # the default input shape is
@@ -931,7 +928,7 @@ def test_video_model(model_fn, dev):
     # test both basicblock and Bottleneck
     model = model_fn(**kwargs)
     model.eval().to(device=dev)
-    # RNG always on CPU, to ensure x in cuda tests is bitwise identical to x in cpu tests
+    # RNG always on CPU, to ensure x in GPU tests is bitwise identical to x in cpu tests
     x = torch.rand(input_shape).to(device=dev)
     out = model(x)
     _assert_expected(out.cpu(), model_name, prec=0.1)
@@ -940,13 +937,12 @@ def test_video_model(model_fn, dev):
     _check_fx_compatible(model, x, eager_out=out)
     assert out.shape[-1] == num_classes
 
-    if dev == "cuda":
-        with torch.cuda.amp.autocast():
-            out = model(x)
-            # See autocast_flaky_numerics comment at top of file.
-            if model_name not in autocast_flaky_numerics:
-                _assert_expected(out.cpu(), model_name, prec=0.1)
-            assert out.shape[-1] == num_classes
+    with torch.amp.autocast(dev):
+        out = model(x)
+        # See autocast_flaky_numerics comment at top of file.
+        if model_name not in autocast_flaky_numerics:
+            _assert_expected(out.cpu(), model_name, prec=0.1)
+        assert out.shape[-1] == num_classes
 
     _check_input_backprop(model, x)
 
@@ -1019,10 +1015,10 @@ def test_detection_model_trainable_backbone_layers(model_fn, disable_weight_load
     assert n_trainable_params == _model_tests_values[model_name]["n_trn_params_per_layer"]
 
 
-@needs_cuda
 @pytest.mark.parametrize("model_fn", list_model_fns(models.optical_flow))
 @pytest.mark.parametrize("scripted", (False, True))
-def test_raft(model_fn, scripted):
+@pytest.mark.parametrize("dev", cuda_and_xpu())
+def test_raft(model_fn, scripted, dev):
 
     torch.manual_seed(0)
 
@@ -1032,13 +1028,13 @@ def test_raft(model_fn, scripted):
     # reduced to 1)
     corr_block = models.optical_flow.raft.CorrBlock(num_levels=2, radius=2)
 
-    model = model_fn(corr_block=corr_block).eval().to("cuda")
+    model = model_fn(corr_block=corr_block).eval().to(dev)
     if scripted:
         model = torch.jit.script(model)
 
     bs = 1
-    img1 = torch.rand(bs, 3, 80, 72).cuda()
-    img2 = torch.rand(bs, 3, 80, 72).cuda()
+    img1 = torch.rand(bs, 3, 80, 72).to(dev)
+    img2 = torch.rand(bs, 3, 80, 72).to(dev)
 
     preds = model(img1, img2)
     flow_pred = preds[-1]

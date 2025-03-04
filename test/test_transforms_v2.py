@@ -23,7 +23,7 @@ import torchvision.transforms.v2 as transforms
 from common_utils import (
     assert_equal,
     cache,
-    cpu_and_cuda,
+    cpu_and_cuda_and_xpu,
     freeze_rng_state,
     ignore_jit_no_profile_information_warning,
     make_bounding_boxes,
@@ -34,7 +34,7 @@ from common_utils import (
     make_segmentation_mask,
     make_video,
     make_video_tensor,
-    needs_cuda,
+    cuda_and_xpu,
     set_rng_seed,
 )
 
@@ -86,16 +86,16 @@ def _to_tolerances(maybe_tolerance_dict):
     return tolerances
 
 
-def _check_kernel_cuda_vs_cpu(kernel, input, *args, rtol, atol, **kwargs):
+def _check_kernel_gpu_vs_cpu(kernel, input, *args, rtol, atol, **kwargs):
     """Checks if the kernel produces closes results for inputs on GPU and CPU."""
-    if input.device.type != "cuda":
+    if input.device.type not in ("cuda", "xpu"):
         return
 
-    input_cuda = input.as_subclass(torch.Tensor)
-    input_cpu = input_cuda.to("cpu")
+    input_gpu = input.as_subclass(torch.Tensor)
+    input_cpu = input_gpu.to("cpu")
 
     with freeze_rng_state():
-        actual = kernel(input_cuda, *args, **kwargs)
+        actual = kernel(input_gpu, *args, **kwargs)
     with freeze_rng_state():
         expected = kernel(input_cpu, *args, **kwargs)
 
@@ -164,7 +164,7 @@ def check_kernel(
     kernel,
     input,
     *args,
-    check_cuda_vs_cpu=True,
+    check_gpu_vs_cpu=True,
     check_scripted_vs_eager=True,
     check_batched_vs_unbatched=True,
     **kwargs,
@@ -183,8 +183,8 @@ def check_kernel(
         assert output.dtype == input.dtype
     assert output.device == input.device
 
-    if check_cuda_vs_cpu:
-        _check_kernel_cuda_vs_cpu(kernel, input, *args, **kwargs, **_to_tolerances(check_cuda_vs_cpu))
+    if check_gpu_vs_cpu:
+        _check_kernel_gpu_vs_cpu(kernel, input, *args, **kwargs, **_to_tolerances(check_gpu_vs_cpu))
 
     if check_scripted_vs_eager:
         _check_kernel_scripted_vs_eager(kernel, input, *args, **kwargs, **_to_tolerances(check_scripted_vs_eager))
@@ -614,7 +614,7 @@ class TestResize:
     @pytest.mark.parametrize("use_max_size", [True, False])
     @pytest.mark.parametrize("antialias", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, size, interpolation, use_max_size, antialias, dtype, device):
         if not (max_size_kwarg := self._make_max_size_kwarg(use_max_size=use_max_size, size=size)):
             return
@@ -622,7 +622,7 @@ class TestResize:
         # In contrast to CPU, there is no native `InterpolationMode.BICUBIC` implementation for uint8 images on CUDA.
         # Internally, it uses the float path. Thus, we need to test with an enormous tolerance here to account for that.
         atol = 30 if (interpolation is transforms.InterpolationMode.BICUBIC and dtype is torch.uint8) else 1
-        check_cuda_vs_cpu_tolerances = dict(rtol=0, atol=atol / 255 if dtype.is_floating_point else atol)
+        check_gpu_vs_cpu_tolerances = dict(rtol=0, atol=atol / 255 if dtype.is_floating_point else atol)
 
         check_kernel(
             F.resize_image,
@@ -631,7 +631,7 @@ class TestResize:
             interpolation=interpolation,
             **max_size_kwarg,
             antialias=antialias,
-            check_cuda_vs_cpu=check_cuda_vs_cpu_tolerances,
+            check_gpu_vs_cpu=check_gpu_vs_cpu_tolerances,
             check_scripted_vs_eager=not isinstance(size, int),
         )
 
@@ -639,7 +639,7 @@ class TestResize:
     @pytest.mark.parametrize("size", OUTPUT_SIZES)
     @pytest.mark.parametrize("use_max_size", [True, False])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, format, size, use_max_size, dtype, device):
         if not (max_size_kwarg := self._make_max_size_kwarg(use_max_size=use_max_size, size=size)):
             return
@@ -698,7 +698,7 @@ class TestResize:
         check_functional_kernel_signature_match(F.resize, kernel=kernel, input_type=input_type)
 
     @pytest.mark.parametrize("size", OUTPUT_SIZES)
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize(
         "make_input",
         [
@@ -982,7 +982,7 @@ class TestResize:
     @pytest.mark.parametrize("antialias", [True, False])
     @pytest.mark.parametrize("memory_format", [torch.contiguous_format, torch.channels_last])
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image_memory_format_consistency(self, interpolation, antialias, memory_format, dtype, device):
         size = self.OUTPUT_SIZES[0]
 
@@ -1008,13 +1008,13 @@ class TestResize:
 
 class TestHorizontalFlip:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.horizontal_flip_image, make_image(dtype=dtype, device=device))
 
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
         check_kernel(
@@ -1056,7 +1056,7 @@ class TestHorizontalFlip:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         check_transform(transforms.RandomHorizontalFlip(p=1), make_input(device=device))
 
@@ -1097,7 +1097,7 @@ class TestHorizontalFlip:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform_noop(self, make_input, device):
         input = make_input(device=device)
 
@@ -1158,7 +1158,7 @@ class TestAffine:
         fill=EXHAUSTIVE_TYPE_FILLS,
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, param, value, dtype, device):
         if param == "fill":
             value = adapt_fill(value, dtype=dtype)
@@ -1167,7 +1167,7 @@ class TestAffine:
             make_image(dtype=dtype, device=device),
             **{param: value},
             check_scripted_vs_eager=not (param in {"shear", "fill"} and isinstance(value, (int, float))),
-            check_cuda_vs_cpu=dict(atol=1, rtol=0)
+            check_gpu_vs_cpu=dict(atol=1, rtol=0)
             if dtype is torch.uint8 and param == "interpolation" and value is transforms.InterpolationMode.BILINEAR
             else True,
         )
@@ -1180,7 +1180,7 @@ class TestAffine:
     )
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, param, value, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
         self._check_kernel(
@@ -1224,7 +1224,7 @@ class TestAffine:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         input = make_input(device=device)
 
@@ -1458,13 +1458,13 @@ class TestAffine:
 
 class TestVerticalFlip:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.vertical_flip_image, make_image(dtype=dtype, device=device))
 
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
         check_kernel(
@@ -1506,7 +1506,7 @@ class TestVerticalFlip:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         check_transform(transforms.RandomVerticalFlip(p=1), make_input(device=device))
 
@@ -1543,7 +1543,7 @@ class TestVerticalFlip:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform_noop(self, make_input, device):
         input = make_input(device=device)
 
@@ -1581,7 +1581,7 @@ class TestRotate:
         fill=EXHAUSTIVE_TYPE_FILLS,
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, param, value, dtype, device):
         kwargs = {param: value}
         if param != "angle":
@@ -1600,7 +1600,7 @@ class TestRotate:
     )
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, param, value, format, dtype, device):
         kwargs = {param: value}
         if param != "angle":
@@ -1648,7 +1648,7 @@ class TestRotate:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         check_transform(
             transforms.RandomRotation(**self._CORRECTNESS_TRANSFORM_AFFINE_RANGES), make_input(device=device)
@@ -2016,7 +2016,7 @@ class TestToDtype:
     )
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float64, torch.uint8])
     @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float64, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("scale", (True, False))
     def test_kernel(self, kernel, make_input, input_dtype, output_dtype, device, scale):
         check_kernel(
@@ -2029,7 +2029,7 @@ class TestToDtype:
     @pytest.mark.parametrize("make_input", [make_image_tensor, make_image, make_video])
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float64, torch.uint8])
     @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float64, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("scale", (True, False))
     def test_functional(self, make_input, input_dtype, output_dtype, device, scale):
         check_functional(
@@ -2045,7 +2045,7 @@ class TestToDtype:
     )
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float64, torch.uint8])
     @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float64, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("scale", (True, False))
     @pytest.mark.parametrize("as_dict", (True, False))
     def test_transform(self, make_input, input_dtype, output_dtype, device, scale, as_dict):
@@ -2089,13 +2089,13 @@ class TestToDtype:
 
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float64, torch.uint8, torch.uint16])
     @pytest.mark.parametrize("output_dtype", [torch.float32, torch.float64, torch.uint8, torch.uint16])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("scale", (True, False))
     def test_image_correctness(self, input_dtype, output_dtype, device, scale):
         if input_dtype.is_floating_point and output_dtype == torch.int64:
             pytest.xfail("float to int64 conversion is not supported")
-        if input_dtype == torch.uint8 and output_dtype == torch.uint16 and device == "cuda":
-            pytest.xfail("uint8 to uint16 conversion is not supported on cuda")
+        if input_dtype == torch.uint8 and output_dtype == torch.uint16 and device in ("cuda", "xpu"):
+            pytest.xfail(f"uint8 to uint16 conversion is not supported on {device}")
 
         input = make_image(dtype=input_dtype, device=device)
 
@@ -2217,7 +2217,7 @@ class TestAdjustBrightness:
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel(self, kernel, make_input, dtype, device):
         check_kernel(kernel, make_input(dtype=dtype, device=device), brightness_factor=self._DEFAULT_BRIGHTNESS_FACTOR)
 
@@ -2315,18 +2315,18 @@ class TestCutMixMixUp:
             img, target = next(iter(dl))
             check_output(img, target)
 
-    @needs_cuda
     @pytest.mark.parametrize("T", [transforms.CutMix, transforms.MixUp])
-    def test_cpu_vs_gpu(self, T):
+    @pytest.mark.parametrize("dev", cuda_and_xpu())
+    def test_cpu_vs_gpu(self, T, dev):
         num_classes = 10
         batch_size = 3
         H, W = 12, 12
 
-        imgs = torch.rand(batch_size, 3, H, W)
-        labels = torch.randint(0, num_classes, (batch_size,))
+        imgs = torch.rand(batch_size, 3, H, W).to(dev)
+        labels = torch.randint(0, num_classes, (batch_size,)).to(dev)
         cutmix_mixup = T(alpha=0.5, num_classes=num_classes)
 
-        _check_kernel_cuda_vs_cpu(cutmix_mixup, imgs, labels, rtol=None, atol=None)
+        _check_kernel_gpu_vs_cpu(cutmix_mixup, imgs, labels, rtol=None, atol=None)
 
     @pytest.mark.parametrize("T", [transforms.CutMix, transforms.MixUp])
     def test_error(self, T):
@@ -2639,7 +2639,7 @@ class TestPermuteChannels:
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel(self, kernel, make_input, dtype, device):
         check_kernel(kernel, make_input(dtype=dtype, device=device), permutation=self._DEFAULT_PERMUTATION)
 
@@ -2690,7 +2690,7 @@ class TestElastic:
         fill=EXHAUSTIVE_TYPE_FILLS,
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8, torch.float16])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, param, value, dtype, device):
         image = make_image_tensor(dtype=dtype, device=device)
 
@@ -2700,12 +2700,12 @@ class TestElastic:
             displacement=self._make_displacement(image),
             **{param: value},
             check_scripted_vs_eager=not (param == "fill" and isinstance(value, (int, float))),
-            check_cuda_vs_cpu=dtype is not torch.float16,
+            check_gpu_vs_cpu=dtype is not torch.float16,
         )
 
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_boxes(self, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
 
@@ -2767,7 +2767,7 @@ class TestElastic:
     )
     # ElasticTransform needs larger images to avoid the needed internal padding being larger than the actual image
     @pytest.mark.parametrize("size", [(163, 163), (72, 333), (313, 95)])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, size, device):
         # We have to skip that test on M1 because it's flaky: Mismatched elements: 35 / 89205 (0.0%)
         # See https://github.com/pytorch/vision/issues/8154
@@ -2825,14 +2825,14 @@ class TestCrop:
 
     @pytest.mark.parametrize("kwargs", CORRECTNESS_CROP_KWARGS)
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, kwargs, dtype, device):
         check_kernel(F.crop_image, make_image(self.INPUT_SIZE, dtype=dtype, device=device), **kwargs)
 
     @pytest.mark.parametrize("kwargs", CORRECTNESS_CROP_KWARGS)
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_bounding_box(self, kwargs, format, dtype, device):
         bounding_boxes = make_bounding_boxes(self.INPUT_SIZE, format=format, dtype=dtype, device=device)
         check_kernel(F.crop_bounding_boxes, bounding_boxes, format=format, **kwargs)
@@ -2982,7 +2982,7 @@ class TestCrop:
     @pytest.mark.parametrize("kwargs", CORRECTNESS_CROP_KWARGS)
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_functional_bounding_box_correctness(self, kwargs, format, dtype, device):
         bounding_boxes = make_bounding_boxes(self.INPUT_SIZE, format=format, dtype=dtype, device=device)
 
@@ -2995,7 +2995,7 @@ class TestCrop:
     @pytest.mark.parametrize("output_size", [(17, 11), (11, 17), (11, 11)])
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.float32, torch.int64])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("seed", list(range(5)))
     def test_transform_bounding_boxes_correctness(self, output_size, format, dtype, device, seed):
         input_size = [s * 2 for s in output_size]
@@ -3042,12 +3042,12 @@ class TestErase:
     )
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.erase_image, make_image(self.INPUT_SIZE, dtype=dtype, device=device), **self.FUNCTIONAL_KWARGS)
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image_inplace(self, dtype, device):
         input = make_image(self.INPUT_SIZE, dtype=dtype, device=device)
         input_version = input._version
@@ -3089,7 +3089,7 @@ class TestErase:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         input = make_input(device=device)
 
@@ -3114,7 +3114,7 @@ class TestErase:
         return erased_image
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_functional_image_correctness(self, dtype, device):
         image = make_image(dtype=dtype, device=device)
 
@@ -3129,7 +3129,7 @@ class TestErase:
         value=[0, 0.5, (0, 1, 0), [-0.2, 0.0, 1.3], "random"],
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.uint8])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("seed", list(range(5)))
     def test_transform_image_correctness(self, param, value, dtype, device, seed):
         transform = transforms.RandomErasing(**{param: value}, p=1)
@@ -3228,7 +3228,7 @@ class TestGaussianBlur:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("sigma", [5, 2.0, (0.5, 2), [1.3, 2.7]])
     def test_transform(self, make_input, device, sigma):
         check_transform(transforms.GaussianBlur(kernel_size=3, sigma=sigma), make_input(device=device))
@@ -3290,7 +3290,7 @@ class TestGaussianBlur:
         ],
     )
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.float16])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_functional_image_correctness(self, dimensions, kernel_size, sigma, dtype, device):
         if dtype is torch.float16 and device == "cpu":
             pytest.skip("The CPU implementation of float16 on CPU differs from opencv")
@@ -3480,7 +3480,7 @@ class TestAutoAugmentTransforms:
     )
     @pytest.mark.parametrize("make_input", [make_image_tensor, make_image_pil, make_image, make_video])
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform_smoke(self, transform, make_input, dtype, device):
         if make_input is make_image_pil and not (dtype is torch.uint8 and device == "cpu"):
             pytest.skip(
@@ -3604,7 +3604,7 @@ class TestConvertBoundingBoxFormat:
 
     @pytest.mark.parametrize(("old_format", "new_format"), old_new_formats)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("fn_type", ["functional", "transform"])
     def test_correctness(self, old_format, new_format, dtype, device, fn_type):
         bounding_boxes = make_bounding_boxes(format=old_format, dtype=dtype, device=device)
@@ -3790,7 +3790,7 @@ class TestPad:
         padding_mode=PADDING_MODES,
     )
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, param, value, dtype, device):
         if param == "fill":
             value = adapt_fill(value, dtype=dtype)
@@ -3937,7 +3937,7 @@ class TestPad:
     @pytest.mark.parametrize("padding", CORRECTNESS_PADDINGS)
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("fn", [F.pad, transform_cls_to_functional(transforms.Pad)])
     def test_bounding_boxes_correctness(self, padding, format, dtype, device, fn):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
@@ -3954,7 +3954,7 @@ class TestCenterCrop:
 
     @pytest.mark.parametrize("output_size", OUTPUT_SIZES)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, output_size, dtype, device):
         check_kernel(
             F.center_crop_image,
@@ -4045,7 +4045,7 @@ class TestCenterCrop:
     @pytest.mark.parametrize("output_size", OUTPUT_SIZES)
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("fn", [F.center_crop, transform_cls_to_functional(transforms.CenterCrop)])
     def test_bounding_boxes_correctness(self, output_size, format, dtype, device, fn):
         bounding_boxes = make_bounding_boxes(self.INPUT_SIZE, format=format, dtype=dtype, device=device)
@@ -4074,7 +4074,7 @@ class TestPerspective:
         fill=EXHAUSTIVE_TYPE_FILLS,
     )
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, param, value, dtype, device):
         if param == "start_end_points":
             kwargs = dict(zip(["startpoints", "endpoints"], value))
@@ -4288,7 +4288,7 @@ class TestPerspective:
     @pytest.mark.parametrize(("startpoints", "endpoints"), START_END_POINTS)
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_correctness_perspective_bounding_boxes(self, startpoints, endpoints, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
 
@@ -4302,7 +4302,7 @@ class TestPerspective:
 
 class TestEqualize:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.equalize_image, make_image(dtype=dtype, device=device))
 
@@ -4385,7 +4385,7 @@ class TestUniformTemporalSubsample:
 
     @pytest.mark.parametrize("num_samples", list(range(1, CORRECTNESS_NUM_FRAMES + 1)))
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize(
         "fn", [F.uniform_temporal_subsample, transform_cls_to_functional(transforms.UniformTemporalSubsample)]
     )
@@ -4406,11 +4406,11 @@ class TestNormalize:
     MEAN, STD = MEANS_STDS[0]
 
     @pytest.mark.parametrize(("mean", "std"), [*MEANS_STDS, (0.5, 2.0)])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, mean, std, device):
         check_kernel(F.normalize_image, make_image(dtype=torch.float32, device=device), mean=self.MEAN, std=self.STD)
 
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image_inplace(self, device):
         input = make_image_tensor(dtype=torch.float32, device=device)
         input_version = input._version
@@ -4495,7 +4495,7 @@ class TestNormalize:
 class TestClampBoundingBoxes:
     @pytest.mark.parametrize("format", SUPPORTED_BOX_FORMATS)
     @pytest.mark.parametrize("dtype", [torch.int64, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel(self, format, dtype, device):
         bounding_boxes = make_bounding_boxes(format=format, dtype=dtype, device=device)
         check_kernel(
@@ -4532,7 +4532,7 @@ class TestClampBoundingBoxes:
 
 class TestInvert:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.invert_image, make_image(dtype=dtype, device=device))
 
@@ -4571,7 +4571,7 @@ class TestInvert:
 
 class TestPosterize:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.posterize_image, make_image(dtype=dtype, device=device), bits=1)
 
@@ -4615,7 +4615,7 @@ class TestSolarize:
         return (float if dtype.is_floating_point else int)(get_max_value(dtype) * factor)
 
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         image = make_image(dtype=dtype, device=device)
         check_kernel(F.solarize_image, image, threshold=self._make_threshold(image))
@@ -4665,7 +4665,7 @@ class TestSolarize:
 
 class TestAutocontrast:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.int16, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.autocontrast_image, make_image(dtype=dtype, device=device))
 
@@ -4704,7 +4704,7 @@ class TestAutocontrast:
 
 class TestAdjustSharpness:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.adjust_sharpness_image, make_image(dtype=dtype, device=device), sharpness_factor=0.5)
 
@@ -4753,7 +4753,7 @@ class TestAdjustSharpness:
 
 class TestAdjustContrast:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.adjust_contrast_image, make_image(dtype=dtype, device=device), contrast_factor=0.5)
 
@@ -4795,7 +4795,7 @@ class TestAdjustContrast:
 
 class TestAdjustGamma:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.adjust_gamma_image, make_image(dtype=dtype, device=device), gamma=0.5)
 
@@ -4835,7 +4835,7 @@ class TestAdjustGamma:
 
 class TestAdjustHue:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.adjust_hue_image, make_image(dtype=dtype, device=device), hue_factor=0.25)
 
@@ -4879,7 +4879,7 @@ class TestAdjustHue:
 
 class TestAdjustSaturation:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.adjust_saturation_image, make_image(dtype=dtype, device=device), saturation_factor=0.5)
 
@@ -4924,7 +4924,7 @@ class TestFiveTenCrop:
     OUTPUT_SIZE = (3, 5)
 
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("kernel", [F.five_crop_image, F.ten_crop_image])
     def test_kernel_image(self, dtype, device, kernel):
         check_kernel(
@@ -5049,7 +5049,7 @@ class TestColorJitter:
         [make_image_tensor, make_image_pil, make_image, make_video],
     )
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, dtype, device):
         if make_input is make_image_pil and not (dtype is torch.uint8 and device == "cpu"):
             pytest.skip(
@@ -5109,7 +5109,7 @@ class TestColorJitter:
 
 class TestRgbToGrayscale:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.rgb_to_grayscale_image, make_image(dtype=dtype, device=device))
 
@@ -5173,7 +5173,7 @@ class TestRgbToGrayscale:
 
 class TestGrayscaleToRgb:
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_kernel_image(self, dtype, device):
         check_kernel(F.grayscale_to_rgb_image, make_image(dtype=dtype, device=device))
 
@@ -5261,7 +5261,7 @@ class TestRandomZoomOut:
             make_video,
         ],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform_params_correctness(self, side_range, make_input, device):
         if make_input is make_image_pil and device != "cpu":
             pytest.skip("PIL image tests with parametrization device!='cpu' will degenerate to that anyway.")
@@ -5292,7 +5292,7 @@ class TestRandomPhotometricDistort:
         [make_image_tensor, make_image_pil, make_image, make_video],
     )
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, dtype, device):
         if make_input is make_image_pil and not (dtype is torch.uint8 and device == "cpu"):
             pytest.skip(
@@ -5318,7 +5318,7 @@ class TestScaleJitter:
         "make_input",
         [make_image_tensor, make_image_pil, make_image, make_bounding_boxes, make_segmentation_mask, make_video],
     )
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, device):
         if make_input is make_image_pil and device != "cpu":
             pytest.skip("PIL image tests with parametrization device!='cpu' will degenerate to that anyway.")
@@ -5359,7 +5359,7 @@ class TestLinearTransform:
 
     @pytest.mark.parametrize("make_input", [make_image_tensor, make_image, make_video])
     @pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     def test_transform(self, make_input, dtype, device):
         input = make_input(dtype=dtype, device=device)
         check_transform(
@@ -5396,16 +5396,16 @@ class TestLinearTransform:
         with pytest.raises(TypeError, match="does not support PIL images"):
             transform(F.to_pil_image(image))
 
-    @needs_cuda
-    def test_transform_error_cuda(self):
-        for matrix_device, vector_device in [("cuda", "cpu"), ("cpu", "cuda")]:
+    @pytest.mark.parametrize("device", cuda_and_xpu())
+    def test_transform_error_cuda(self, device):
+        for matrix_device, vector_device in [(device, "cpu"), ("cpu", device)]:
             with pytest.raises(ValueError, match="Input tensors should be on the same device"):
                 transforms.LinearTransformation(
                     transformation_matrix=torch.rand(2, 2, device=matrix_device),
                     mean_vector=torch.rand(2, device=vector_device),
                 )
 
-        for input_device, param_device in [("cuda", "cpu"), ("cpu", "cuda")]:
+        for input_device, param_device in [(device, "cpu"), ("cpu", device)]:
             input = make_image(device=input_device)
             transform = transforms.LinearTransformation(*self._make_matrix_and_vector(input, device=param_device))
             with pytest.raises(
@@ -5598,7 +5598,7 @@ def test_pure_tensor_heuristic(make_inputs):
 
 
 class TestRandomIoUCrop:
-    @pytest.mark.parametrize("device", cpu_and_cuda())
+    @pytest.mark.parametrize("device", cpu_and_cuda_and_xpu())
     @pytest.mark.parametrize("options", [[0.5, 0.9], [2.0]])
     def test_make_params(self, device, options):
         orig_h, orig_w = size = (24, 32)
